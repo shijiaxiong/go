@@ -40,24 +40,29 @@ ok:
 
 // func Syscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2, err uintptr)
 TEXT ·Syscall6(SB),NOSPLIT,$0-80
-	CALL	runtime·entersyscall(SB)
+	CALL	runtime·entersyscall(SB)    // 位于 runtime/proc.go：3564
+	# 按照linux系统约定复制参数到寄存器并调用syscall指令进入内核
 	MOVQ	a1+8(FP), DI
 	MOVQ	a2+16(FP), SI
 	MOVQ	a3+24(FP), DX
 	MOVQ	a4+32(FP), R10
 	MOVQ	a5+40(FP), R8
 	MOVQ	a6+48(FP), R9
-	MOVQ	trap+0(FP), AX	// syscall entry
-	SYSCALL
+	MOVQ	trap+0(FP), AX	// syscall entry，系统调用编号放入AX
+	SYSCALL // 进入内核系统调用
+
+	# 从内核返回，判断返回值，linux使用 -1 ~ -4095 作为错误码
 	CMPQ	AX, $0xfffffffffffff001
 	JLS	ok6
+
+	# 系统调用返回错误，为Syscall6函数准备返回值
 	MOVQ	$-1, r1+56(FP)
 	MOVQ	$0, r2+64(FP)
 	NEGQ	AX
 	MOVQ	AX, err+72(FP)
-	CALL	runtime·exitsyscall(SB)
+	CALL	runtime·exitsyscall(SB) // 位于 runtime/proc.go：3658
 	RET
-ok6:
+ok6:     #系统调用返回错误
 	MOVQ	AX, r1+56(FP)
 	MOVQ	DX, r2+64(FP)
 	MOVQ	$0, err+72(FP)

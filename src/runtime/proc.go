@@ -3496,7 +3496,7 @@ func save(pc, sp uintptr) {
 //
 //go:nosplit
 func reentersyscall(pc, sp uintptr) {
-	_g_ := getg()
+	_g_ := getg()	// 执行系统调用的goroutine
 
 	// Disable preemption because during this function g is in Gsyscall status,
 	// but can have inconsistent g->sched, do not let GC observe it.
@@ -3543,10 +3543,10 @@ func reentersyscall(pc, sp uintptr) {
 	_g_.m.syscalltick = _g_.m.p.ptr().syscalltick
 	_g_.sysblocktraced = true
 	pp := _g_.m.p.ptr()
-	pp.m = 0
-	_g_.m.oldp.set(pp)
-	_g_.m.p = 0
-	atomic.Store(&pp.status, _Psyscall)
+	pp.m = 0	// p解除与m之间的绑定
+	_g_.m.oldp.set(pp)	// 把p记录在oldp中，等从系统调用返回时，优先绑定这个p
+	_g_.m.p = 0	// m解除与p之间的绑定
+	atomic.Store(&pp.status, _Psyscall)	// 修改当前p的状态，sysmon线程依赖状态实施抢占
 	if sched.gcwaiting != 0 {
 		systemstack(entersyscall_gcwait)
 		save(pc, sp)
@@ -3664,16 +3664,20 @@ func exitsyscall() {
 	}
 
 	_g_.waitsince = 0
-	oldp := _g_.m.oldp.ptr()
+	oldp := _g_.m.oldp.ptr() // oldp是进入系统调用之前所绑定的p
 	_g_.m.oldp = 0
+	// 因为在进入系统调用之前已经解除了m和p之间的绑定，所以现在需要绑定p
 	if exitsyscallfast(oldp) {
+		//绑定成功，设置一些状态
 		if trace.enabled {
 			if oldp != _g_.m.p.ptr() || _g_.m.syscalltick != _g_.m.p.ptr().syscalltick {
 				systemstack(traceGoStart)
 			}
 		}
 		// There's a cpu for us, so we can run.
-		_g_.m.p.ptr().syscalltick++
+		_g_.m.p.ptr().syscalltick++ 	// 系统调用完成，增加syscalltick计数，sysmon线程依靠它判断是否是同一次系统调用
+
+		// casgstatus函数会处理一些垃圾回收相关的事情，我们只需知道该函数重新把g设置成_Grunning状态即可
 		// We need to cas the status and scan before resuming...
 		casgstatus(_g_, _Gsyscall, _Grunning)
 
@@ -3715,6 +3719,7 @@ func exitsyscall() {
 	_g_.m.locks--
 
 	// Call the scheduler.
+	// 没有绑定到p，调用mcall切换到g0栈执行exitsyscall0函数
 	mcall(exitsyscall0)
 
 	// Scheduler returned, so we're allowed to run now.
@@ -3738,9 +3743,11 @@ func exitsyscallfast(oldp *p) bool {
 	}
 
 	// Try to re-acquire the last P.
+	// 尝试快速绑定进入系统调用之前所使用的p
 	if oldp != nil && oldp.status == _Psyscall && atomic.Cas(&oldp.status, _Psyscall, _Pidle) {
 		// There's a cpu for us, so we can run.
-		wirep(oldp)
+		// 使用cas操作获取到p的使用权，所以之后的代码不需要使用锁就可以直接操作p
+		wirep(oldp)	// 绑定P
 		exitsyscallfast_reacquired()
 		return true
 	}
@@ -3749,7 +3756,7 @@ func exitsyscallfast(oldp *p) bool {
 	if sched.pidle != 0 {
 		var ok bool
 		systemstack(func() {
-			ok = exitsyscallfast_pidle()
+			ok = exitsyscallfast_pidle()	// 从全局队列中寻找空闲的p，需要加锁，比较慢
 			if ok && trace.enabled {
 				if oldp != nil {
 					// Wait till traceGoSysBlock event is emitted.
