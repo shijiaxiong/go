@@ -3800,7 +3800,7 @@ func exitsyscallfast_reacquired() {
 
 func exitsyscallfast_pidle() bool {
 	lock(&sched.lock)
-	_p_ := pidleget()
+	_p_ := pidleget()	// 从全局空闲列表中获取P
 	if _p_ != nil && atomic.Load(&sched.sysmonwait) != 0 {
 		atomic.Store(&sched.sysmonwait, 0)
 		notewakeup(&sched.sysmonnote)
@@ -3820,30 +3820,34 @@ func exitsyscallfast_pidle() bool {
 func exitsyscall0(gp *g) {
 	_g_ := getg()
 
+	// 从系统调用到可运行状态
 	casgstatus(gp, _Gsyscall, _Grunnable)
+	// 当前工作线程没有绑定到p,所以需要解除m和g的关系
 	dropg()
 	lock(&sched.lock)
 	var _p_ *p
 	if schedEnabled(_g_) {
-		_p_ = pidleget()
+		_p_ = pidleget()	// 再次尝试获取空闲的p
 	}
-	if _p_ == nil {
-		globrunqput(gp)
+	if _p_ == nil {	// 还是没有空闲的p
+		globrunqput(gp)	// 把g放入全局运行队列
 	} else if atomic.Load(&sched.sysmonwait) != 0 {
 		atomic.Store(&sched.sysmonwait, 0)
 		notewakeup(&sched.sysmonnote)
 	}
 	unlock(&sched.lock)
-	if _p_ != nil {
-		acquirep(_p_)
-		execute(gp, false) // Never returns.
+	if _p_ != nil {	// 获得了空闲的P
+		acquirep(_p_)	// 绑定
+		execute(gp, false) // Never returns. 继续运行
 	}
 	if _g_.m.lockedg != 0 {
 		// Wait until another thread schedules gp and so m again.
 		stoplockedm()
 		execute(gp, false) // Never returns.
 	}
+	// 当前工作线程进入睡眠，等待被其它线程唤醒
 	stopm()
+	// 从睡眠中被其它线程唤醒，执行schedule调度循环重新开始工作
 	schedule() // Never returns.
 }
 
