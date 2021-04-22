@@ -221,6 +221,7 @@ func newosproc(mp *m) {
 	// setup and then calls mstart.
 	var oset sigset
 	sigprocmask(_SIG_SETMASK, &sigset_all, &oset)
+	// 创建线程和M绑定，最终会调用mstart
 	err = pthread_create(&attr, funcPC(mstart_stub), unsafe.Pointer(mp))
 	sigprocmask(_SIG_SETMASK, &oset, nil)
 	if err != 0 {

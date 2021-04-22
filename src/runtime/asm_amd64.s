@@ -216,19 +216,19 @@ ok:
 	MOVQ	24(SP), AX		// copy argv
 	MOVQ	AX, 8(SP)
 	CALL	runtime·args(SB)
-	CALL	runtime·osinit(SB)
-	CALL	runtime·schedinit(SB)
+	CALL	runtime·osinit(SB)  // 执行的结果是全局变量 ncpu = CPU核数
+	CALL	runtime·schedinit(SB)   // 调度系统初始化
 
 	// create a new goroutine to start program
 	MOVQ	$runtime·mainPC(SB), AX		// entry
 	PUSHQ	AX
 	PUSHQ	$0			// arg size
-	CALL	runtime·newproc(SB)
+	CALL	runtime·newproc(SB) // 创建main goroutine
 	POPQ	AX
 	POPQ	AX
 
 	// start this M
-	CALL	runtime·mstart(SB)
+	CALL	runtime·mstart(SB)  // 主线程进入调度循环，运行刚刚创建的goroutine
 
 	CALL	runtime·abort(SB)	// mstart should never return
 	RET
@@ -278,27 +278,43 @@ TEXT runtime·gosave(SB), NOSPLIT, $0-8
 
 // func gogo(buf *gobuf)
 // restore state from Gobuf; longjmp
+// 从g0到gp的的切换
 TEXT runtime·gogo(SB), NOSPLIT, $16-8
 	MOVQ	buf+0(FP), BX		// gobuf
 	MOVQ	gobuf_g(BX), DX
 	MOVQ	0(DX), CX		// make sure g != nil
 	get_tls(CX)
+
+    // 把要运行的g的指针放入线程本地存储，这样后面的代码就可以通过线程本地存储
+    // 获取到当前正在执行的goroutine的g结构体对象，从而找到与之关联的m和p
 	MOVQ	DX, g(CX)
+
+	// 把CPU的SP寄存器设置为sched.sp，完成了栈的切换
 	MOVQ	gobuf_sp(BX), SP	// restore SP
+
+	// 下面三条同样是恢复调度上下文到CPU相关寄存器
 	MOVQ	gobuf_ret(BX), AX
 	MOVQ	gobuf_ctxt(BX), DX
 	MOVQ	gobuf_bp(BX), BP
+
+	// 清空sched的值，因为我们已把相关值放入CPU对应的寄存器了，不再需要，这样做可以少gc的工作量
 	MOVQ	$0, gobuf_sp(BX)	// clear to help garbage collector
 	MOVQ	$0, gobuf_ret(BX)
 	MOVQ	$0, gobuf_ctxt(BX)
 	MOVQ	$0, gobuf_bp(BX)
+
+	// 把sched.pc值放入BX寄存器
 	MOVQ	gobuf_pc(BX), BX
+
+	// JMP把BX寄存器的包含的地址值放入CPU的IP寄存器，于是，CPU跳转到该地址继续执行指令，
 	JMP	BX
 
 // func mcall(fn func(*g))
 // Switch to m->g0's stack, call fn(g).
 // Fn must never return. It should gogo(&g->sched)
 // to keep running g.
+// 首先从当前运行的g 切换到g0，这一步包括保存当前g的调度信息，把g0设置到tls中，修改CPU的rsp寄存器使其指向g0的栈；
+// 以当前运行的g 为参数调用fn函数(此处为goexit0)
 TEXT runtime·mcall(SB), NOSPLIT, $0-8
 	MOVQ	fn+0(FP), DI
 

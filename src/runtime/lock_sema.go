@@ -178,7 +178,7 @@ func notesleep(n *note) {
 	// Queued. Sleep.
 	gp.m.blocked = true
 	if *cgo_yield == nil {
-		semasleep(-1)
+		semasleep(-1)//睡眠信号
 	} else {
 		// Sleep for an arbitrary-but-moderate interval to poll libc interceptors.
 		const ns = 10e6

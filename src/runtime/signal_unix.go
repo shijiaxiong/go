@@ -325,14 +325,18 @@ func sigpipe() {
 func doSigPreempt(gp *g, ctxt *sigctxt) {
 	// Check if this G wants to be preempted and is safe to
 	// preempt.
+	// 检查此 G 是否要被抢占并且可以安全地抢占
 	if wantAsyncPreempt(gp) {
+		// 检查是否可以安全的抢占
 		if ok, newpc := isAsyncSafePoint(gp, ctxt.sigpc(), ctxt.sigsp(), ctxt.siglr()); ok {
 			// Adjust the PC and inject a call to asyncPreempt.
+			// 修改寄存器 并执行抢占信号
 			ctxt.pushCall(funcPC(asyncPreempt), newpc)
 		}
 	}
 
 	// Acknowledge the preemption.
+	// 更新抢占的相关字段
 	atomic.Xadd(&gp.m.preemptGen, 1)
 	atomic.Store(&gp.m.signalPending, 0)
 
