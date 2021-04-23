@@ -1195,6 +1195,7 @@ func (db *DB) nextRequestKeyLocked() uint64 {
 // conn returns a newly-opened or cached *driverConn.
 func (db *DB) conn(ctx context.Context, strategy connReuseStrategy) (*driverConn, error) {
 	db.mu.Lock()
+	// 检测是否已经关闭
 	if db.closed {
 		db.mu.Unlock()
 		return nil, errDBClosed
@@ -1202,6 +1203,7 @@ func (db *DB) conn(ctx context.Context, strategy connReuseStrategy) (*driverConn
 	// Check if the context is expired.
 	select {
 	default:
+	// 检测context是否因为超时取消
 	case <-ctx.Done():
 		db.mu.Unlock()
 		return nil, ctx.Err()
@@ -1209,6 +1211,8 @@ func (db *DB) conn(ctx context.Context, strategy connReuseStrategy) (*driverConn
 	lifetime := db.maxLifetime
 
 	// Prefer a free connection, if possible.
+	// 这边如果在freeConn这个切片有空闲连接的话，就left pop一个出列。
+	// 注意的是，这边因为是切片操作，所以前面需要加锁且获取后进行解锁操作。同时判断返回的连接是否已经过期。
 	numFree := len(db.freeConn)
 	if strategy == cachedOrNewConn && numFree > 0 {
 		conn := db.freeConn[0]
@@ -1234,9 +1238,12 @@ func (db *DB) conn(ctx context.Context, strategy connReuseStrategy) (*driverConn
 
 	// Out of free connections or we were asked not to use one. If we're not
 	// allowed to open any more connections, make a request and wait.
+	// 这边就是等候获取连接的重点了。当空闲的连接为空的时候，这边将会新建一个request（的等待连接 的请求）并且开始等待
 	if db.maxOpen > 0 && db.numOpen >= db.maxOpen {
 		// Make the connRequest channel. It's buffered so that the
 		// connectionOpener doesn't block while waiting for the req to be read.
+		// 下面的动作相当于往connRequests这个map插入自己的号码牌。
+		// 插入号码牌之后这边就不需要阻塞等待继续往下走逻辑。
 		req := make(chan connRequest, 1)
 		reqKey := db.nextRequestKeyLocked()
 		db.connRequests[reqKey] = req
@@ -1250,6 +1257,7 @@ func (db *DB) conn(ctx context.Context, strategy connReuseStrategy) (*driverConn
 		case <-ctx.Done():
 			// Remove the connection request and ensure no value has been sent
 			// on it after removing.
+			// context取消操作的时候，记得从connRequests这个map取走自己的号码牌。
 			db.mu.Lock()
 			delete(db.connRequests, reqKey)
 			db.mu.Unlock()
@@ -1259,12 +1267,14 @@ func (db *DB) conn(ctx context.Context, strategy connReuseStrategy) (*driverConn
 			select {
 			default:
 			case ret, ok := <-req:
+				// 这边值得注意了，因为现在已经被context取消了。但是刚刚放了自己的号码牌进去排队里面。意思是说不定已经发了连接了，所以得注意归还！
 				if ok && ret.conn != nil {
 					db.putConn(ret.conn, ret.err, false)
 				}
 			}
 			return nil, ctx.Err()
 		case ret, ok := <-req:
+			// 下面是已经获得连接后的操作了。检测一下获得连接的状况。因为有可能已经过期了等等。
 			atomic.AddInt64(&db.waitDuration, int64(time.Since(waitStart)))
 
 			if !ok {
@@ -1296,6 +1306,7 @@ func (db *DB) conn(ctx context.Context, strategy connReuseStrategy) (*driverConn
 		}
 	}
 
+	// 下面就是如果上面说的限制情况不存在，可以创建先连接时候，要做的创建连接操作了。
 	db.numOpen++ // optimistically
 	db.mu.Unlock()
 	ci, err := db.connector.Connect(ctx)
@@ -1413,9 +1424,11 @@ func (db *DB) putConnDBLocked(dc *driverConn, err error) bool {
 	if db.closed {
 		return false
 	}
+	// 如果已经超过最大打开数量了，就不需要在回归pool了
 	if db.maxOpen > 0 && db.numOpen > db.maxOpen {
 		return false
 	}
+	// 从connRequest的等待队列中随机抽取一个等待的请求。直接给它，不用再放回池中
 	if c := len(db.connRequests); c > 0 {
 		var req chan connRequest
 		var reqKey uint64
@@ -1426,6 +1439,7 @@ func (db *DB) putConnDBLocked(dc *driverConn, err error) bool {
 		if err == nil {
 			dc.inUse = true
 		}
+		// 把连接给这个正在排队的连接。
 		req <- connRequest{
 			conn: dc,
 			err:  err,
